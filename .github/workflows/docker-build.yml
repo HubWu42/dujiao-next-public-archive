@@ -1,10 +1,11 @@
-# 构建镜像并交给 Argo CD 部署（ADR-0005）。CI 不直接碰集群，部署由 Argo CD 按 Git 同步。
+# 构建镜像，把版本回写进 main 上的覆盖层，交给 Argo CD 部署（ADR-0005、ADR-0008）。
+# CI 不直接碰集群，测试和生产的 Argo CD 应用都跟 main，按覆盖层里写的版本同步。
 #
-#   合并到 main：构建 main-<短 sha> → 写回 deploy/k8s/dujiao-next/overlays/test → 通知 Argo CD（家里测试集群）
-#   打 tag v<版本>：核对 overlays/prod 已钉到 <版本> → 构建 <版本> → release 分支快进到这个 tag → 通知 Argo CD（生产）
-#
-# 发正式版前先运行 bash deploy/scripts/release-prep.sh <版本> 并合进 main，再在那个提交上打 tag。
-# 干跑 tag（v<版本>-dry.N）只构建、推送带 -dry.N 的镜像，不动 release 分支。
+#   合并到 main：构建 main-<短 sha> → 回写 overlays/test → 通知 Argo CD（家里测试集群）
+#   在 main 上打 tag v<版本>：核对 tag 在 main 上、格式正确 → 构建 <版本> → 回写 overlays/prod → 通知 Argo CD（生产）
+#   干跑 tag v<版本>-dry.N：只构建、推送带 -dry.N 的镜像，不回写，生产不变
+#   手动触发并填 tag（回滚用）：tag 必须是 main 上已有的正式 tag；镜像已存在就跳过构建，只回写 overlays/prod
+#   手动触发不填 tag：按所选分支构建 main-<短 sha>，选的是 main 时同样回写 overlays/test
 name: docker-build
 
 on:
@@ -12,6 +13,11 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '回滚生产：填一个已发过的正式 tag（如 v2026.10.24-r1）；留空则按所选分支构建测试版'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -19,44 +25,87 @@ permissions:
 env:
   IMAGE_NAME: hubwu42/dujiao-next
   OVERLAY_TEST: deploy/k8s/dujiao-next/overlays/test
+  OVERLAY_PROD: deploy/k8s/dujiao-next/overlays/prod
+  # 正式版本：日期发布标识 2026.10.24-r1（按北京时间，同一天从 r1 递增），或 1.2.3 这种三段号
+  RELEASE_RE: '^([0-9]+\.[0-9]+\.[0-9]+|[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?-r[1-9][0-9]{0,2})$'
 
 jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
-      is_release: ${{ steps.meta.outputs.is_release }}
-      is_dry: ${{ steps.meta.outputs.is_dry }}
+      sha: ${{ steps.meta.outputs.sha }}
+      kind: ${{ steps.meta.outputs.kind }}
+      build: ${{ steps.image.outputs.build }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Resolve image tag
         id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            version="${GITHUB_REF_NAME#v}"
-            release="${version%-dry.*}"
-            if [ "$release" != "$version" ]; then is_dry=true; else is_dry=false; fi
-            # tag 必须切在 main 上：release 分支只做快进，main 之外的提交会让它分叉
-            git fetch --no-tags origin main
-            git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
-            if [ "$is_dry" = false ]; then
-              bash deploy/scripts/release-prep.sh --check "$version"
-            fi
-            { echo "tag=$version"; echo "is_release=true"; echo "is_dry=$is_dry"; } >> "$GITHUB_OUTPUT"
+          # kind：test 测试版，release 正式版（回写 overlays/prod），dry 干跑
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ -n "$INPUT_TAG" ]; then
+            ref="$INPUT_TAG"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            ref="$GITHUB_REF_NAME"
           else
-            { echo "tag=main-${GITHUB_SHA::7}"; echo "is_release=false"; echo "is_dry=false"; } >> "$GITHUB_OUTPUT"
+            { echo "tag=main-${GITHUB_SHA::7}"; echo "sha=$GITHUB_SHA"; echo "kind=test"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${ref#v}"
+          release="${version%-dry.*}"
+          [ "$ref" = "v$version" ] && [[ $release =~ $RELEASE_RE ]] ||
+            { echo "::error::tag 格式不对：${ref}（要 v2026.10.24-r1、v1.2.3，干跑加 -dry.N）"; exit 1; }
+          if [ "$release" = "$version" ]; then
+            kind=release
+          elif [[ ${version#"$release"} =~ ^-dry\.[1-9][0-9]*$ ]] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            kind=dry
+          else
+            echo "::error::tag 格式不对：${ref}（干跑后缀要 -dry.N，手动回滚只接受正式 tag）"; exit 1
+          fi
+          sha=$(git rev-parse --verify "refs/tags/$ref^{commit}") ||
+            { echo "::error::仓里没有 tag $ref"; exit 1; }
+          # tag 必须切在 main 上：回写只进 main，main 之外的提交不该上生产
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$sha" FETCH_HEAD ||
+            { echo "::error::$ref 不在 main 上"; exit 1; }
+          { echo "tag=$version"; echo "sha=$sha"; echo "kind=$kind"; } >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        if: inputs.tag != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check image exists
+        id: image
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 只有手动回滚才看镜像在不在：在就不重建，直接回写；推送触发的照常构建
+          if [ -n "$INPUT_TAG" ] && docker manifest inspect "$IMAGE_NAME:$TAG" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "- 镜像 \`$IMAGE_NAME:$TAG\` 已存在，跳过构建" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
   build:
     needs: meta
+    if: needs.meta.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout api
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.meta.outputs.sha }}
           fetch-depth: 0
 
       # ---- Fullstack: admin + user frontends are in this monorepo ----
@@ -106,18 +155,19 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.tag }}
           labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.tag }}
           build-args: |
             APP_VERSION=${{ needs.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # 两条回写各用一个 concurrency 组，不共用：GitHub 的同组排队只留最新一个待跑任务，
+  # 共用一组时一次测试版回写可能把排着队的正式版回写取消掉。两条同时推 main 由
+  # write-overlay.sh 的「被拒就 rebase 重试」兜住，两条改的是不同文件，rebase 不会冲突。
   deploy-test:
-    # 把测试版镜像号提交回 main。用 GITHUB_TOKEN 推的提交不会再触发任何 workflow，
-    # 提交信息里的 [skip ci] 是第二道保险。
     needs: [meta, build]
-    if: github.ref == 'refs/heads/main'
+    if: needs.meta.outputs.kind == 'test' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,48 +178,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-
       - name: Write test image tag
         env:
           TAG: ${{ needs.meta.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          for attempt in 1 2 3; do
-            (cd "$OVERLAY_TEST" && kustomize edit set image "$IMAGE_NAME=$IMAGE_NAME:$TAG")
-            if git diff --quiet; then
-              echo "测试环境已是 $TAG"
-              break
-            fi
-            git commit -am "chore(deploy): test 环境镜像改为 $TAG [skip ci]"
-            if git push origin HEAD:main; then break; fi
-            [ "$attempt" -lt 3 ] || { echo "::error::推送 main 三次都被拒"; exit 1; }
-            git reset --hard HEAD~1
-            git pull --rebase origin main
-          done
-          echo "- 测试环境镜像 → \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
-
+        run: bash .github/scripts/write-overlay.sh "$OVERLAY_TEST" "$TAG" test
       - name: Notify Argo CD
         env:
           ARGOCD_WEBHOOK_SECRET: ${{ secrets.ARGOCD_WEBHOOK_SECRET }}
         run: bash .github/scripts/argocd-webhook.sh main "$(git rev-parse HEAD)"
 
-  promote:
-    # 镜像推成功之后才动 release 分支：Argo CD 一看到新提交就会去拉这个版本
+  deploy-prod:
+    # 镜像推成功（或回滚时镜像本来就在）之后才回写：Argo CD 一看到 overlays/prod 变了就会去拉这个版本
     needs: [meta, build]
-    if: needs.meta.outputs.is_release == 'true' && needs.meta.outputs.is_dry != 'true'
+    if: >-
+      always() && needs.meta.result == 'success' && needs.meta.outputs.kind == 'release' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-      - name: Fast-forward release
-        run: |
-          # 不加 --force：release 只许快进，分叉了说明有人手动改过，宁可失败让人看
-          git push origin "${GITHUB_SHA}:refs/heads/release"
-          echo "- release → \`${GITHUB_REF_NAME}\`（${GITHUB_SHA::7}）" >> "$GITHUB_STEP_SUMMARY"
+        with:
+          ref: main
+      - name: Write prod image tag
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: bash .github/scripts/write-overlay.sh "$OVERLAY_PROD" "$TAG" prod
       - name: Notify Argo CD
         env:
           ARGOCD_WEBHOOK_SECRET: ${{ secrets.ARGOCD_WEBHOOK_SECRET }}
-        run: bash .github/scripts/argocd-webhook.sh release "$GITHUB_SHA"
+        run: bash .github/scripts/argocd-webhook.sh main "$(git rev-parse HEAD)"
