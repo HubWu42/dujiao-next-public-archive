@@ -7,7 +7,7 @@ resources:
 images:
 - name: hubwu42/dujiao-next
   newName: hubwu42/dujiao-next
-  newTag: main-75789f5
+  newTag: main-d84f89d
 configMapGenerator:
 - behavior: merge
   literals:
