@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '回滚生产：填一个已发过的正式 tag（如 v2026.10.24-r1）；留空则按所选分支构建测试版'
+        description: '回滚生产：填一个已发过的正式 tag（如 v2026.10.24-r1）；只能在 main 上触发；留空则按 main 构建测试版'
         required: false
         default: ''
 
