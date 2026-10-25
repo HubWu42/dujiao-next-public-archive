@@ -5,7 +5,7 @@ resources:
   - ../../base
 images:
   - name: hubwu42/dujiao-next
-    newTag: 29b04fb
+    newTag: "2026.10.25-r1"
 patches:
   # 服务与库都在国内区域（ADR-0005：区域内自成一体）
   - target:
