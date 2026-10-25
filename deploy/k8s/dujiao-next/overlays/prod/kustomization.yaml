@@ -8,7 +8,7 @@ resources:
 images:
 - name: hubwu42/dujiao-next
   newName: hubwu42/dujiao-next
-  newTag: 2026.10.25-r1
+  newTag: 2026.10.25-r2
 patches:
 - patch: |-
     - op: add
