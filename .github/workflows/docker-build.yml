@@ -4,8 +4,10 @@
 #   合并到 main：构建 main-<短 sha> → 回写 overlays/test → 通知 Argo CD（家里测试集群）
 #   在 main 上打 tag v<版本>：核对 tag 在 main 上、格式正确 → 构建 <版本> → 回写 overlays/prod → 通知 Argo CD（生产）
 #   干跑 tag v<版本>-dry.N：只构建、推送带 -dry.N 的镜像，不回写，生产不变
-#   手动触发并填 tag（回滚用）：tag 必须是 main 上已有的正式 tag；镜像已存在就跳过构建，只回写 overlays/prod
-#   手动触发不填 tag：按所选分支构建 main-<短 sha>，选的是 main 时同样回写 overlays/test
+#   手动触发只能选 main 分支，选别的分支第一步就失败：手动触发跑的是所选分支上的这份文件，没合并的流程改动不能去写生产
+#   手动触发并填 tag（回滚用）：tag 必须是 main 上已有的正式 tag，它的镜像必须已在 Docker Hub 上；不构建，只回写 overlays/prod。
+#     镜像不在、或者查镜像出错（鉴权、网络），都直接失败并写明原因，不现场重建
+#   手动触发不填 tag：和合并到 main 一样，构建 main-<短 sha> 并回写 overlays/test
 name: docker-build
 
 on:
@@ -38,6 +40,12 @@ jobs:
       kind: ${{ steps.meta.outputs.kind }}
       build: ${{ steps.image.outputs.build }}
     steps:
+      # 手动触发用的是所选分支上的这份文件；只认 main，免得别的分支改过的流程去写生产版本
+      - name: Refuse non-main dispatch
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::手动触发只能在 main 上进行，当前选的是 ${GITHUB_REF}"
+          exit 1
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -89,12 +97,23 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
-          # 只有手动回滚才看镜像在不在：在就不重建，直接回写；推送触发的照常构建
-          if [ -n "$INPUT_TAG" ] && docker manifest inspect "$IMAGE_NAME:$TAG" >/dev/null 2>&1; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "- 镜像 \`$IMAGE_NAME:$TAG\` 已存在，跳过构建" >> "$GITHUB_STEP_SUMMARY"
-          else
+          # 推送触发和不填 tag 的手动触发照常构建
+          if [ -z "$INPUT_TAG" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 回滚不重新构建：镜像不在说明这个 tag 当初没发布成功，要发这份代码就打一个新 tag。
+          # 查询出错（鉴权、网络）也停下，免得被当成「不存在」去重建、覆盖已发布的正式镜像。
+          if err=$(docker manifest inspect "${IMAGE_NAME}:${TAG}" 2>&1 >/dev/null); then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "- 回滚：镜像 \`${IMAGE_NAME}:${TAG}\` 已存在，跳过构建" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q 'no such manifest' <<<"$err"; then
+            echo "::error::Docker Hub 上没有 ${IMAGE_NAME}:${TAG}，这个 tag 没发布成功过；要发这份代码就打一个新 tag"
+            exit 1
+          else
+            echo "$err"
+            echo "::error::查询 Docker Hub 上的 ${IMAGE_NAME}:${TAG} 出错（鉴权或网络），没法确认镜像在不在，回滚停下：$(tr '\n' ' ' <<<"$err")"
+            exit 1
           fi
 
   build:

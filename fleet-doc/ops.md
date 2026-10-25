@@ -162,7 +162,9 @@ kubectl --context gosail-prod -n argocd annotate application dujiao-next-prod ar
 gh workflow run docker-build.yml -R HubWu42/dujiao-next --ref main -f tag=v2026.10.23-r1
 ```
 
-`meta` 照样核对这个 tag 的格式、核对它在 `main` 上（只接受正式 tag，不接受干跑 tag），再看 Docker Hub 上有没有这个版本的镜像：有就跳过构建，`deploy-prod` 直接把版本写回 `overlays/prod`；没有就从 tag 所在的提交重新构建一次再写回。
+分支只能选 `main`：手动触发跑的是所选分支上的那份 `docker-build.yml`，选别的分支时 `meta` 第一步就失败，免得没合并的流程改动去写生产。
+
+`meta` 照样核对这个 tag 的格式、核对它在 `main` 上（只接受正式 tag，不接受干跑 tag），再查 Docker Hub 上这个版本的镜像。镜像在，就跳过构建，`deploy-prod` 直接把版本写回 `overlays/prod`。镜像不在，说明这个 tag 当初没发布成功，workflow 失败退出，不构建、不回写；要发这份代码就按〈发正式版〉打一个新 tag。查镜像本身出错（Docker Hub 鉴权失败、网络问题）时同样失败退出，日志里写明是查询出错，这时没法确认镜像在不在，修好凭证或等网络恢复后重跑。
 
 退回之后：
 
