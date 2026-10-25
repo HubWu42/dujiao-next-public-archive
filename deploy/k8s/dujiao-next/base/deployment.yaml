@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dujiao-next
+spec:
+  replicas: 1
+  # 上传目录是 ReadWriteOnce 的本地卷，新旧 Pod 不能同时挂
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      containers:
+        - name: dujiao-next
+          image: hubwu42/dujiao-next
+          ports:
+            - name: http
+              containerPort: 8080
+          # 配置走 viper 的环境变量：键名是配置项路径把 . 换成 _ 再大写（database.dsn → DATABASE_DSN）
+          envFrom:
+            - configMapRef:
+                name: dujiao-next-env
+          env:
+            # 先声明凭证，后面的连接串才能用 $(变量) 引用
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: DB_PASSWORD }
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: REDIS_PASSWORD }
+            - name: QUEUE_PASSWORD
+              value: $(REDIS_PASSWORD)
+            - name: DATABASE_DRIVER
+              value: postgres
+            - name: DATABASE_DSN
+              value: host=$(DB_HOST) port=5432 user=$(DB_USER) password=$(DB_PASSWORD) dbname=$(DB_NAME) sslmode=disable TimeZone=Asia/Shanghai
+            # SQLite 时代默认 1 个连接，换 PG 后放开
+            - name: DATABASE_POOL_MAX_OPEN_CONNS
+              value: "10"
+            - name: DATABASE_POOL_MAX_IDLE_CONNS
+              value: "5"
+            - name: REDIS_PREFIX
+              value: dj
+            - name: APP_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: APP_SECRET_KEY }
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: JWT_SECRET }
+            - name: USER_JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: USER_JWT_SECRET }
+            - name: BOOTSTRAP_DEFAULT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: BOOTSTRAP_DEFAULT_ADMIN_PASSWORD }
+            - name: SERVER_MODE
+              value: release
+            # 不易猜的后台路径（web.admin_path），沿用线上原值；没配时回落到默认 /admin
+            - name: WEB_ADMIN_PATH
+              valueFrom:
+                secretKeyRef: { name: dujiao-next-secrets, key: WEB_ADMIN_PATH, optional: true }
+            - name: TZ
+              value: Asia/Shanghai
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+            # 日志写容器内的临时目录，kubectl logs 看标准输出即可
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: dujiao-next-uploads
+        - name: logs
+          emptyDir: {}

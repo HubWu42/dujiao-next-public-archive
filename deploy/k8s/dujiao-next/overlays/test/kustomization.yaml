@@ -1,0 +1,31 @@
+# 测试环境：家里测试集群，跟本仓 main。镜像版本由 CI 在合并到 main 后写回这里（.github/workflows/docker-build.yml）。
+# PG、Redis 在本集群 data-cn 里，与生产同名；测试与生产只在库名和账号上不同（ADR-0005）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: hubwu42/dujiao-next
+    newTag: 29b04fb
+configMapGenerator:
+  - name: dujiao-next-env
+    behavior: merge
+    literals:
+      - DB_HOST=pg-cn-rw.data-cn.svc.cluster.local
+      - DB_USER=dujiao_test
+      - DB_NAME=dujiao_test
+      - REDIS_HOST=redis.data-cn.svc.cluster.local
+      - REDIS_DB=5
+      - QUEUE_HOST=redis.data-cn.svc.cluster.local
+      - QUEUE_DB=6
+patches:
+  - target:
+      kind: Ingress
+      name: dujiao-next
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: store.test.gosail.tech
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: store.test.gosail.tech

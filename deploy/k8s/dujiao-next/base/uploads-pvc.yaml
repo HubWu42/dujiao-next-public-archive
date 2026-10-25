@@ -1,0 +1,15 @@
+# 商品图等上传文件，换节点会丢（local-path 是节点本地盘）；备份范围按 ADR-0005 的推迟项后续再定
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dujiao-next-uploads
+  annotations:
+    # 删了就是丢图：Argo CD 永不修剪、永不删除它
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

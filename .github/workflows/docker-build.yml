@@ -1,3 +1,10 @@
+# 构建镜像并交给 Argo CD 部署（ADR-0005）。CI 不直接碰集群，部署由 Argo CD 按 Git 同步。
+#
+#   合并到 main：构建 main-<短 sha> → 写回 deploy/k8s/dujiao-next/overlays/test → 通知 Argo CD（家里测试集群）
+#   打 tag v<版本>：核对 overlays/prod 已钉到 <版本> → 构建 <版本> → release 分支快进到这个 tag → 通知 Argo CD（生产）
+#
+# 发正式版前先运行 bash deploy/scripts/release-prep.sh <版本> 并合进 main，再在那个提交上打 tag。
+# 干跑 tag（v<版本>-dry.N）只构建、推送带 -dry.N 的镜像，不动 release 分支。
 name: docker-build
 
 on:
@@ -6,11 +13,45 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   IMAGE_NAME: hubwu42/dujiao-next
+  OVERLAY_TEST: deploy/k8s/dujiao-next/overlays/test
 
 jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      is_release: ${{ steps.meta.outputs.is_release }}
+      is_dry: ${{ steps.meta.outputs.is_dry }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve image tag
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            release="${version%-dry.*}"
+            if [ "$release" != "$version" ]; then is_dry=true; else is_dry=false; fi
+            # tag 必须切在 main 上：release 分支只做快进，main 之外的提交会让它分叉
+            git fetch --no-tags origin main
+            git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+            if [ "$is_dry" = false ]; then
+              bash deploy/scripts/release-prep.sh --check "$version"
+            fi
+            { echo "tag=$version"; echo "is_release=true"; echo "is_dry=$is_dry"; } >> "$GITHUB_OUTPUT"
+          else
+            { echo "tag=main-${GITHUB_SHA::7}"; echo "is_release=false"; echo "is_dry=false"; } >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - name: Checkout api
@@ -48,9 +89,6 @@ jobs:
           cp -r user/dist  internal/web/dist/user
 
       # ---- Docker build & push ----
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -60,25 +98,78 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=,format=short
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.tag }}
           build-args: |
-            APP_VERSION=${{ github.ref_name }}
+            APP_VERSION=${{ needs.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy-test:
+    # 把测试版镜像号提交回 main。用 GITHUB_TOKEN 推的提交不会再触发任何 workflow，
+    # 提交信息里的 [skip ci] 是第二道保险。
+    needs: [meta, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: deploy-test
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Write test image tag
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3; do
+            (cd "$OVERLAY_TEST" && kustomize edit set image "$IMAGE_NAME=$IMAGE_NAME:$TAG")
+            if git diff --quiet; then
+              echo "测试环境已是 $TAG"
+              break
+            fi
+            git commit -am "chore(deploy): test 环境镜像改为 $TAG [skip ci]"
+            if git push origin HEAD:main; then break; fi
+            [ "$attempt" -lt 3 ] || { echo "::error::推送 main 三次都被拒"; exit 1; }
+            git reset --hard HEAD~1
+            git pull --rebase origin main
+          done
+          echo "- 测试环境镜像 → \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Argo CD
+        env:
+          ARGOCD_WEBHOOK_SECRET: ${{ secrets.ARGOCD_WEBHOOK_SECRET }}
+        run: bash .github/scripts/argocd-webhook.sh main "$(git rev-parse HEAD)"
+
+  promote:
+    # 镜像推成功之后才动 release 分支：Argo CD 一看到新提交就会去拉这个版本
+    needs: [meta, build]
+    if: needs.meta.outputs.is_release == 'true' && needs.meta.outputs.is_dry != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fast-forward release
+        run: |
+          # 不加 --force：release 只许快进，分叉了说明有人手动改过，宁可失败让人看
+          git push origin "${GITHUB_SHA}:refs/heads/release"
+          echo "- release → \`${GITHUB_REF_NAME}\`（${GITHUB_SHA::7}）" >> "$GITHUB_STEP_SUMMARY"
+      - name: Notify Argo CD
+        env:
+          ARGOCD_WEBHOOK_SECRET: ${{ secrets.ARGOCD_WEBHOOK_SECRET }}
+        run: bash .github/scripts/argocd-webhook.sh release "$GITHUB_SHA"

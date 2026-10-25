@@ -1,0 +1,24 @@
+# 灰云：用户在国内，直连国内入口（GoSail ADR-0005〈域名〉）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dujiao-next
+  annotations:
+    external-dns.kubernetes.io/target: entry-cn.gosail.tech
+    external-dns.kubernetes.io/cloudflare-proxied: "false"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - store.gosail.tech
+  rules:
+    - host: store.gosail.tech
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dujiao-next
+                port:
+                  name: http

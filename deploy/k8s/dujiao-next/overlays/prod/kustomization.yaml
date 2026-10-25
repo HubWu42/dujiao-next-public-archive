@@ -1,0 +1,18 @@
+# 生产环境：云上生产集群，跟本仓 release 分支。镜像版本由 deploy/scripts/release-prep.sh 在打 tag 前写进这里。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: hubwu42/dujiao-next
+    newTag: 29b04fb
+patches:
+  # 服务与库都在国内区域（ADR-0005：区域内自成一体）
+  - target:
+      kind: Deployment
+      name: dujiao-next
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          region: cn

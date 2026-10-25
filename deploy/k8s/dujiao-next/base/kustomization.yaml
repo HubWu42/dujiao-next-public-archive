@@ -1,0 +1,30 @@
+# 独角数卡（fullstack 单二进制：API + 前后台页面）的部署单元（ADR-0005）。
+# 三层变量（D11）：服务默认值在 deployment.yaml；随环境变的（库、Redis 库号）在 ConfigMap dujiao-next-env，
+# 基础层写生产的值、测试覆盖层用 behavior: merge 改掉；凭证在 Secret dujiao-next-secrets，
+# 由工作空间 deploy/scripts/secrets.js 按 deploy/secrets-map.yaml 推进集群。
+#
+# 数据库从 SQLite 换成区域 PG（D17：每个服务 <服务>_test / <服务>_prod 两个库）。
+# 现网 SQLite 里的数据怎么搬到 PG 不在本单元，本单元只声明目标状态。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dujiao-next
+labels:
+  - pairs:
+      app.kubernetes.io/name: dujiao-next
+      app.kubernetes.io/part-of: gosail
+    includeSelectors: true
+configMapGenerator:
+  - name: dujiao-next-env
+    literals:
+      - DB_HOST=pg-cn-rw.data-cn.svc.cluster.local
+      - DB_USER=dujiao_prod
+      - DB_NAME=dujiao_prod
+      - REDIS_HOST=redis.data-cn.svc.cluster.local
+      - REDIS_DB=3
+      - QUEUE_HOST=redis.data-cn.svc.cluster.local
+      - QUEUE_DB=4
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - uploads-pvc.yaml
