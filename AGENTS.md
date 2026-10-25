@@ -13,8 +13,8 @@
 | `internal/web/` | 带 `fullstack` 构建标签时把两个前端的构建产物嵌进二进制并提供页面 | 不带这个标签时不嵌页面，二进制只有 API |
 | `admin/` | 管理后台（Vue 3 + Vite），独立的前端包 | 只经 HTTP 调后端 API，不引用 Go 代码 |
 | `user/` | 用户前台（Vue 3 + Vite），独立的前端包 | 同上 |
-| `deploy/` | K8s 部署单元、发版前写版本号的脚本、机密对照表 | 只放部署配置，说明在 `fleet-doc/ops.md` |
-| `.github/workflows/` | `docker-build.yml` 出测试版与正式版镜像；`release.yml` 是上游的 GoReleaser 发包 | 发版流程以 `fleet-doc/ops.md` 为准 |
+| `deploy/` | K8s 部署单元、机密对照表 | 只放部署配置，说明在 `fleet-doc/ops.md` |
+| `.github/workflows/` | `docker-build.yml` 出测试版与正式版镜像；`release.yml` 是上游的 GoReleaser 发包，已在 GitHub 上停用 | 发版流程以 `fleet-doc/ops.md` 为准 |
 
 ## 大致架构
 

@@ -1,18 +1,20 @@
-# 生产环境：云上生产集群，跟本仓 release 分支。镜像版本由 deploy/scripts/release-prep.sh 在打 tag 前写进这里。
+# 生产环境：云上生产集群，跟本仓 main。镜像版本由 CI 在 main 上打正式 tag、构建完镜像后写回这里（.github/workflows/docker-build.yml）。
+# 服务与库都在国内区域，下面的 patch 只把 Pod 调度到国内区域的节点（ADR-0005：区域内自成一体）。
+# 本文件按 kustomize edit 的输出格式书写，CI 回写时只改 newTag 一行。
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../../base
+- ../../base
 images:
-  - name: hubwu42/dujiao-next
-    newTag: "2026.10.25-r1"
+- name: hubwu42/dujiao-next
+  newName: hubwu42/dujiao-next
+  newTag: 2026.10.25-r1
 patches:
-  # 服务与库都在国内区域（ADR-0005：区域内自成一体）
-  - target:
-      kind: Deployment
-      name: dujiao-next
-    patch: |-
-      - op: add
-        path: /spec/template/spec/nodeSelector
-        value:
-          region: cn
+- patch: |-
+    - op: add
+      path: /spec/template/spec/nodeSelector
+      value:
+        region: cn
+  target:
+    kind: Deployment
+    name: dujiao-next
